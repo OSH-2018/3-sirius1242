@@ -15,6 +15,24 @@ struct filenode {
 static const size_t size = 4 * 1024 * 1024 * (size_t)1024;
 static void *mem[64 * 1024];
 
+void *allocate(int size)
+{
+    int *plen;
+    int len = size + sizeof(size);
+    plen = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    *plen = len;
+    return (void*)(&plen[1]);
+}
+
+void allo_free (void * ptr)
+{
+    int *plen = (int*)ptr;
+    int len;
+    plen--;
+    len = *plen;
+    munmap((void*)plen, len);
+}
+
 static struct filenode *root = NULL;
 
 static struct filenode *get_filenode(const char *name)
@@ -31,10 +49,10 @@ static struct filenode *get_filenode(const char *name)
 
 static void create_filenode(const char *filename, const struct stat *st)
 {
-    struct filenode *new = (struct filenode *)malloc(sizeof(struct filenode));
-    new->filename = (char *)malloc(strlen(filename) + 1);
+    struct filenode *new = (struct filenode *)allocate(sizeof(struct filenode));
+    new->filename = (char *)allocate(strlen(filename) + 1);
     memcpy(new->filename, filename, strlen(filename) + 1);
-    new->st = (struct stat *)malloc(sizeof(struct stat));
+    new->st = (struct stat *)allocate(sizeof(struct stat));
     memcpy(new->st, st, sizeof(struct stat));
     new->next = root;
     new->content = NULL;
@@ -149,9 +167,9 @@ static int oshfs_unlink(const char *path)
     }
     else
         root = node->next;
-    free(node->st);
-    free(node->content);
-    free(node);
+    allo_free(node->st);
+    allo_free(node->content);
+    allo_free(node);
     return 0;
 }
 
