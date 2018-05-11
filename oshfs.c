@@ -20,6 +20,7 @@ void *allocate(int size)
     int *plen;
     int len = size + sizeof(size);
     plen = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    //if(plen == NULL) -- how to warn?
     *plen = len;
     return (void*)(&plen[1]);
 }
@@ -33,7 +34,21 @@ void allo_free (void * ptr)
     munmap((void*)plen, len);
 }
 
-static struct filenode *root = NULL;
+void *reallocate(void *ptr, int size)
+{
+    void *nptr = allocate(size);
+    int *plen = (int*)ptr;
+    int len;
+    plen--;
+    if (ptr != NULL)
+    {
+        memcpy(nptr, ptr, *plen);
+        allo_free(ptr);
+    }
+    return nptr;
+}
+
+static struct filenode* root = NULL;
 
 static struct filenode *get_filenode(const char *name)
 {
@@ -131,7 +146,7 @@ static int oshfs_write(const char *path, const char *buf, size_t size, off_t off
 {
     struct filenode *node = get_filenode(path);
     node->st->st_size = offset + size;
-    node->content = realloc(node->content, offset + size);
+    node->content = reallocate(node->content, offset + size);
     memcpy(node->content + offset, buf, size);
     return size;
 }
@@ -140,7 +155,7 @@ static int oshfs_truncate(const char *path, off_t size)
 {
     struct filenode *node = get_filenode(path);
     node->st->st_size = size;
-    node->content = realloc(node->content, size);
+    node->content = reallocate(node->content, size);
     return 0;
 }
 
