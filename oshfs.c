@@ -1,9 +1,12 @@
-#define FUSE_USE_VERSION 26
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fuse.h>
 #include <sys/mman.h>
+#define FUSE_USE_VERSION 26
+#define BLOCK_SIZE 1024
+#define SPACE 4
+#define BITMAP_BLOCK sizeof(long long)*8
 
 struct filenode {
     char *filename;
@@ -12,8 +15,52 @@ struct filenode {
     struct filenode *next;
 };
 
-static const size_t size = 4 * 1024 * 1024 * (size_t)1024;
-static void *mem[64 * 1024];
+static const size_t size = SPACE * 1024 * 1024 * (size_t)1024;
+static const size_t block_num = size/BLOCK_SIZE;
+static const int _bitmap = block_num/BITMAP_BLOCK;
+static long long bitmap[_bitmap];
+static void *mem[block_num];
+
+void *label_bitmap(int number)
+{
+    bitmap[number/BITMAP_BLOCK] |= 1 << (number%BITMAP_BLOCK);
+}
+
+void *unlabel_bitmap(int number)
+{
+    bitmap[number/BITMAP_BLOCK] &= !(1 << (number%BITMAP_BLOCK));
+}
+
+void *find_block()
+{
+    long long tmp;
+    int i;
+    int k;
+    for(i=0; i<_bitmap; i++)
+        if(bitmap[i] != -1)
+        {
+            tmp = bitmap[i] ^ -1;
+            k = 0;
+            while(1)
+            {
+                if(tmp&1)
+                    return i * BITMAP_BLOCK + k;
+                tmp = tmp >> 2;
+                k ++;
+            }
+        }
+}
+void *block_allocate(int number)
+{
+    int i;
+    int num;
+    for(i = 0; i < number, i++)
+    {
+        num = find_block();
+        mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        label_bitmap(num);
+    }
+}
 
 void *allocate(int size)
 {
