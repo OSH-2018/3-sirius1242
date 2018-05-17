@@ -4,9 +4,10 @@
 #include <fuse.h>
 #include <sys/mman.h>
 #define FUSE_USE_VERSION 26
-#define BLOCK_SIZE 1024
+#define BLOCK_SIZE 1024 * 8
 #define SPACE 4
 #define BITMAP_BLOCK sizeof(long long)*8
+#define BLK_ARY 64
 
 struct filenode {
     char *filename;
@@ -15,6 +16,10 @@ struct filenode {
     struct filenode *next;
 };
 
+struct block_array {
+    int bid[BLK_ARY];
+    struct block_array * next;
+};
 static const size_t size = SPACE * 1024 * 1024 * (size_t)1024;
 static const size_t block_num = size/BLOCK_SIZE;
 static const int _bitmap = block_num/BITMAP_BLOCK;
@@ -50,26 +55,36 @@ void *find_block()
             }
         }
 }
-void *block_allocate(int number)
+int block_allocate(int number)
 {
     int i;
     int num;
+    struct block_array content[number/_bitmap];
+    for(i=0;i<number/_bitmap;i++)
+    {
+        if(i==number/_bitmap)
+            content[i].next = NULL;
+        else
+            content[i].next = content[i+1];
+    }
     for(i = 0; i < number, i++)
     {
         num = find_block();
         mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
         label_bitmap(num);
+        content[i/_bitmap].bid[i%_bitmap] = num;
+        return num;
+        // TODO: wrong! multi blocks need to record in content
     }
 }
 
-void *allocate(int size)
+struct block_array *allocate(int size)
 {
-    int *plen;
-    int len = size + sizeof(size);
-    plen = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    struct block_array *content;
+    int numbers;
+    numbers = size/BLOCK_SIZE;
     //if(plen == NULL) -- how to warn?
-    *plen = len;
-    return (void*)(&plen[1]);
+    return content;
 }
 
 void allo_free (void * ptr)
