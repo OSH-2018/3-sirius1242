@@ -9,16 +9,16 @@
 #define BITMAP_BLOCK sizeof(long long)*8
 #define BLK_ARY 64
 
-struct filenode {
-    char *filename;
-    void *content;
-    struct stat *st;
-    struct filenode *next;
-};
-
 struct block_array {
     int bid[BLK_ARY];
     struct block_array * next;
+};
+
+struct filenode {
+    char *filename;
+    struct block_array *content;
+    struct stat *st;
+    struct filenode *next;
 };
 static const size_t size = SPACE * 1024 * 1024 * (size_t)1024;
 static const size_t block_num = size/BLOCK_SIZE;
@@ -36,7 +36,7 @@ void *unlabel_bitmap(int number)
     bitmap[number/BITMAP_BLOCK] &= !(1 << (number%BITMAP_BLOCK));
 }
 
-void *find_block()
+int find_block()
 {
     long long tmp;
     int i;
@@ -55,59 +55,82 @@ void *find_block()
             }
         }
 }
-int block_allocate(int number)
+struct block_array * allocate(int size)
 {
     int i;
     int num;
+    int number = size/BLOCK_SIZE;
     struct block_array content[number/_bitmap];
+    struct block_array *p = content;
     for(i=0;i<number/_bitmap;i++)
     {
         if(i==number/_bitmap)
             content[i].next = NULL;
         else
-            content[i].next = content[i+1];
+            *content[i].next = content[i+1];
     }
-    for(i = 0; i < number, i++)
+    for(i = 0; i < number; i++)
     {
         num = find_block();
         mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
         label_bitmap(num);
         content[i/_bitmap].bid[i%_bitmap] = num;
-        return num;
-        // TODO: wrong! multi blocks need to record in content
     }
+    for(;i<(number/_bitmap+1)*_bitmap;i++)
+        content[i/_bitmap].bid[i%_bitmap] = -1;
+    return p;
 }
 
-struct block_array *allocate(int size)
+void allo_free (struct block_array * ptr)
 {
-    struct block_array *content;
-    int numbers;
-    numbers = size/BLOCK_SIZE;
-    //if(plen == NULL) -- how to warn?
-    return content;
-}
-
-void allo_free (void * ptr)
-{
-    int *plen = (int*)ptr;
-    int len;
-    plen--;
-    len = *plen;
-    munmap((void*)plen, len);
-}
-
-void *reallocate(void *ptr, int size)
-{
-    void *nptr = allocate(size);
-    int *plen = (int*)ptr;
-    int len;
-    plen--;
-    if (ptr != NULL)
+    int i, j, num;
+    j = 0;
+    while(1)
     {
-        memcpy(nptr, ptr, *plen);
-        allo_free(ptr);
+        for(i=0;i<_bitmap;i++)
+        {
+            num = ptr[j].bid[i];
+            if(num < 0)
+                return;
+            munmap(mem[num], BLOCK_SIZE);
+        }
+        j++;
     }
-    return nptr;
+}
+
+struct block_array *reallocate(struct block_array *ptr, int size)
+{
+    int number_1 = size/BLOCK_SIZE;
+    int offset, k;
+    int i = 0;
+    int num;
+    struct block_array * p = ptr;
+    while(p->next != NULL)
+    {
+        p = p->next;
+        i++;
+    }
+    k = i;
+    offset = number_1 - k * _bitmap;
+    struct block_array content[offset/_bitmap];
+    p->next = &content[0];
+    for(i=0;i<offset/_bitmap;i++)
+    {
+        if(i==offset/_bitmap)
+            content[i].next = NULL;
+        else
+            *content[i].next = content[i+1];
+    }
+    for(i=0;p->bid[i]>=0;i++);
+    for(; i <= offset; i++)
+    {
+        num = find_block();
+        mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        label_bitmap(num);
+        content[i/_bitmap].bid[i%_bitmap] = num;
+    }
+    for(;i<(offset/_bitmap+1)*_bitmap;i++)
+        content[i/_bitmap].bid[i%_bitmap] = -1;
 }
 
 static struct filenode* root = NULL;
