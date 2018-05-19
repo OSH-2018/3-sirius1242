@@ -1,13 +1,15 @@
+#define FUSE_USE_VERSION 26
+#define BLOCK_SIZE 1024
+#define SPACE 4
+#define BITMAP_BLOCK sizeof(long long)
+#define BLK_ARY 64
+#define BLOCK_NUM SPACE * 1024 * 1024 / (BLOCK_SIZE/1024)
+#define _BITMAP BLOCK_NUM / BITMAP_BLOCK
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fuse.h>
 #include <sys/mman.h>
-#define FUSE_USE_VERSION 26
-#define BLOCK_SIZE 1024 * 8
-#define SPACE 4
-#define BITMAP_BLOCK sizeof(long long)*8
-#define BLK_ARY 64
 
 struct block_array {
     int bid[BLK_ARY];
@@ -21,19 +23,19 @@ struct filenode {
     struct filenode *next;
 };
 static const size_t size = SPACE * 1024 * 1024 * (size_t)1024;
-static const size_t block_num = size/BLOCK_SIZE;
-static const int _bitmap = block_num/BITMAP_BLOCK;
-static long long bitmap[_bitmap];
-static void *mem[block_num];
+/*static const size_t BLOCK_NUM = size/BLOCK_SIZE;
+static const size_t _BITMAP = BLOCK_NUM/BITMAP_BLOCK;*/
+static long long bitmap[_BITMAP];
+static void *mem[BLOCK_NUM];
 
-void *label_bitmap(int number)
+void label_bitmap(int number)
 {
     bitmap[number/BITMAP_BLOCK] |= 1 << (number%BITMAP_BLOCK);
 }
 
-void *unlabel_bitmap(int number)
+void unlabel_bitmap(int number)
 {
-    bitmap[number/BITMAP_BLOCK] &= !(1 << (number%BITMAP_BLOCK));
+    bitmap[number/BITMAP_BLOCK] &= ~(1 << (number%BITMAP_BLOCK));
 }
 
 int find_block()
@@ -41,7 +43,7 @@ int find_block()
     long long tmp;
     int i;
     int k;
-    for(i=0; i<_bitmap; i++)
+    for(i=0; i<_BITMAP; i++)
         if(bitmap[i] != -1)
         {
             tmp = bitmap[i] ^ -1;
@@ -60,24 +62,24 @@ struct block_array * allocate(int size)
     int i;
     int num;
     int number = size/BLOCK_SIZE;
-    struct block_array content[number/_bitmap];
+    struct block_array content[number/BLK_ARY];
     struct block_array *p = content;
-    for(i=0;i<number/_bitmap;i++)
+    for(i=0;i<number/BLK_ARY;i++)
     {
-        if(i==number/_bitmap)
+        if(i==number/BLK_ARY)
             content[i].next = NULL;
         else
-            *content[i].next = content[i+1];
+            content[i].next = &content[i+1];
     }
     for(i = 0; i < number; i++)
     {
         num = find_block();
         mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
         label_bitmap(num);
-        content[i/_bitmap].bid[i%_bitmap] = num;
+        content[i/BLK_ARY].bid[i%BLK_ARY] = num;
     }
-    for(;i<(number/_bitmap+1)*_bitmap;i++)
-        content[i/_bitmap].bid[i%_bitmap] = -1;
+    for(;i<(number/BLK_ARY+1)*BLK_ARY;i++)
+       content[i/BLK_ARY].bid[i%BLK_ARY] = -1;
     return p;
 }
 
@@ -87,7 +89,7 @@ void allo_free (struct block_array * ptr)
     j = 0;
     while(1)
     {
-        for(i=0;i<_bitmap;i++)
+        for(i=0;i<BLK_ARY;i++)
         {
             num = ptr[j].bid[i];
             if(num < 0)
@@ -104,22 +106,28 @@ struct block_array *reallocate(struct block_array *ptr, int size)
     int offset, k;
     int i = 0;
     int num;
+    int len;
     struct block_array * p = ptr;
-    while(p->next != NULL)
-    {
-        p = p->next;
-        i++;
-    }
+    number_1 += (size%BLOCK_SIZE==0)?0:1;
+    if(p != NULL)
+        while(p->next != NULL)
+        {
+            p = p->next;
+            i++;
+        }
     k = i;
-    offset = number_1 - k * _bitmap;
-    struct block_array content[offset/_bitmap];
-    p->next = &content[0];
-    for(i=0;i<offset/_bitmap;i++)
+    offset = number_1 - k * BLOCK_SIZE;
+    struct block_array content[offset/BLK_ARY];
+    if(p == NULL)
+        p = &content[0];
+    else
+        p->next = &content[0];
+    for(i=0;i<offset/BLK_ARY;i++)
     {
-        if(i==offset/_bitmap)
+        if(i==offset/BLK_ARY)
             content[i].next = NULL;
         else
-            *content[i].next = content[i+1];
+            content[i].next = &content[i+1];
     }
     for(i=0;p->bid[i]>=0;i++);
     for(; i <= offset; i++)
@@ -127,10 +135,11 @@ struct block_array *reallocate(struct block_array *ptr, int size)
         num = find_block();
         mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
         label_bitmap(num);
-        content[i/_bitmap].bid[i%_bitmap] = num;
+        content[i/BLK_ARY].bid[i%BLK_ARY] = num;
     }
-    for(;i<(offset/_bitmap+1)*_bitmap;i++)
-        content[i/_bitmap].bid[i%_bitmap] = -1;
+    for(;i<(offset/BLK_ARY+1)*BLK_ARY;i++)
+        content[i/BLK_ARY].bid[i%BLK_ARY] = -1;
+    return ptr;
 }
 
 static struct filenode* root = NULL;
@@ -149,10 +158,10 @@ static struct filenode *get_filenode(const char *name)
 
 static void create_filenode(const char *filename, const struct stat *st)
 {
-    struct filenode *new = (struct filenode *)allocate(sizeof(struct filenode));
-    new->filename = (char *)allocate(strlen(filename) + 1);
+    struct filenode *new = (struct filenode *)malloc(sizeof(struct filenode));
+    new->filename = (char *)malloc(strlen(filename) + 1);
     memcpy(new->filename, filename, strlen(filename) + 1);
-    new->st = (struct stat *)allocate(sizeof(struct stat));
+    new->st = (struct stat *)malloc(sizeof(struct stat));
     memcpy(new->st, st, sizeof(struct stat));
     new->next = root;
     new->content = NULL;
@@ -161,7 +170,7 @@ static void create_filenode(const char *filename, const struct stat *st)
 
 static void *oshfs_init(struct fuse_conn_info *conn)
 {
-    size_t blocknr = sizeof(mem) / sizeof(mem[0]);
+    /*size_t blocknr = sizeof(mem) / sizeof(mem[0]);
     size_t blocksize = size / blocknr;
     // Demo 1
     for(int i = 0; i < blocknr; i++) {
@@ -180,6 +189,7 @@ static void *oshfs_init(struct fuse_conn_info *conn)
     for(int i = 0; i < blocknr; i++) {
         munmap(mem[i], blocksize);
     }
+    */
     return NULL;
 }
 
