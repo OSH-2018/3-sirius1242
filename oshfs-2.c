@@ -1,148 +1,101 @@
 #define FUSE_USE_VERSION 26
-#define BLOCK_SIZE 1024
-#define SPACE 4
-#define BITMAP_BLOCK sizeof(long long) * 8
-#define BLK_ARY 64
-#define BLOCK_NUM SPACE * 1024 * 1024 / (BLOCK_SIZE/1024)
-#define _BITMAP BLOCK_NUM / BITMAP_BLOCK
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fuse.h>
 #include <sys/mman.h>
-
-struct block_array {
-    int bid[BLK_ARY];
-    struct block_array * next;
-};
+#include <unistd.h>
+#define malloc mm_malloc
+#define free mm_free
+#define realloc mm_realloc
+#define OVERHEAD sizeof(block_header)
+#define HDRP(bp) ((char *)(bp) - sizeof(block_header))
+#define GET_SIZE(p)  ((block_header *)(p))->size
+#define GET_ALLOC(p) ((block_header *)(p))->allocated
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
+#define ALIGNMENT 16
+#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~(ALIGNMENT-1))
+#define CHUNK_SIZE (1 << 14)
+#define CHUNK_ALIGN(size) (((size)+(CHUNK_SIZE-1)) & ~(CHUNK_SIZE-1))
 
 struct filenode {
     char *filename;
-    struct block_array *content;
+    void *content;
     struct stat *st;
     struct filenode *next;
 };
-static const size_t size = SPACE * 1024 * 1024 * (size_t)1024;
-/*static const size_t BLOCK_NUM = size/BLOCK_SIZE;
-static const size_t _BITMAP = BLOCK_NUM/BITMAP_BLOCK;*/
-static long long bitmap[_BITMAP] = {0};
-static void *mem[BLOCK_NUM];
 
-void label_bitmap(int number)
-{
-    bitmap[number/BITMAP_BLOCK] |= 1 << (number%BITMAP_BLOCK);
+typedef struct {
+  size_t size;
+  char   allocated;
+}block_header;
+
+void *first_bp;
+
+int mm_init() {
+  sbrk(sizeof(block_header));
+  first_bp = sbrk(0);
+  GET_SIZE(HDRP(first_bp)) = 0;
+  GET_ALLOC(HDRP(first_bp)) = 1;
+  return 0;
 }
 
-void unlabel_bitmap(int number)
-{
-    bitmap[number/BITMAP_BLOCK] &= ~(1 << (number%BITMAP_BLOCK));
+void extend(size_t new_size) {
+  size_t chunk_size = CHUNK_ALIGN(new_size);
+  void *bp = sbrk(chunk_size);
+  GET_SIZE(HDRP(bp)) = chunk_size;
+  GET_ALLOC(HDRP(bp)) = 0;
+  GET_SIZE(HDRP(NEXT_BLKP(bp))) = 0;
+  GET_ALLOC(HDRP(NEXT_BLKP(bp))) = 1;
 }
 
-int find_block()
-{
-    long long tmp;
-    int i;
-    int k;
-    for(i=0; i<_BITMAP; i++)
-        if(bitmap[i] != -1)
-        {
-            tmp = bitmap[i] ^ -1;
-            k = 0;
-            while(1)
-            {
-                if(tmp&1)
-                    return i * BITMAP_BLOCK + k;
-                tmp = tmp >> 2;
-                k ++;
-            }
-        }
+void set_allocated(void *bp, size_t size) {
+  size_t extra_size = GET_SIZE(HDRP(bp)) - size;
+  if (extra_size > ALIGN(1 + OVERHEAD)) {
+    GET_SIZE(HDRP(bp)) = size;
+    GET_SIZE(HDRP(NEXT_BLKP(bp))) = extra_size;
+    GET_ALLOC(HDRP(NEXT_BLKP(bp))) = 0;
+  }
+  GET_ALLOC(HDRP(bp)) = 1;
 }
-struct block_array * allocate(int size)
-{
-    int i;
-    int num;
-    int number = size/BLOCK_SIZE;
-    struct block_array content[number/BLK_ARY];
-    struct block_array *p = content;
-    for(i=0;i<number/BLK_ARY;i++)
-    {
-        if(i==number/BLK_ARY)
-            content[i].next = NULL;
-        else
-            content[i].next = &content[i+1];
+
+void *mm_malloc(size_t size) {
+  int new_size = ALIGN(size + OVERHEAD);
+  void *bp = first_bp;
+  while (GET_SIZE(HDRP(bp)) != 0) {
+    if (!GET_ALLOC(HDRP(bp))
+        && (GET_SIZE(HDRP(bp)) >= new_size)) {
+      set_allocated(bp, new_size);
+      return bp;
     }
-    for(i = 0; i < number; i++)
-    {
-        num = find_block();
-        mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-        label_bitmap(num);
-        content[i/BLK_ARY].bid[i%BLK_ARY] = num+1;
-    }
-    /*for(;i<(number/BLK_ARY+1)*BLK_ARY;i++)
-       content[i/BLK_ARY].bid[i%BLK_ARY] = -1;*/
-    return p;
+    bp = NEXT_BLKP(bp);
+  }
+  extend(new_size);
+  set_allocated(bp, new_size);
+  return bp;
 }
 
-void allo_free (struct block_array * ptr)
-{
-    int i, j, num;
-    j = 0;
-    while(1)
-    {
-        for(i=0;i<BLK_ARY;i++)
-        {
-            num = ptr[j].bid[i]-1;
-            if(num < 0)
-                return;
-            munmap(mem[num], BLOCK_SIZE);
-        }
-        j++;
-    }
+void mm_free(void *bp) {
+  GET_ALLOC(HDRP(bp)) = 0;
 }
 
-struct block_array *reallocate(struct block_array *ptr, int size)
-{
-    int number_1 = size/BLOCK_SIZE;
-    int offset, k;
-    int i = 0;
-    int num;
-    int len;
-    struct block_array * p = ptr;
-    number_1 += (size%BLOCK_SIZE==0)?0:1;
-    if(p != NULL)
-        while(p->next != NULL)
-        {
-            p = p->next;
-            i++;
-        }
-    k = i;
-    offset = number_1 - k * BLOCK_SIZE;
-    struct block_array content[offset/BLK_ARY];
-    if(p == NULL)
-        p = &content[0];
-    else
-        p->next = &content[0];
-    for(i=0;i<offset/BLK_ARY;i++)
+void *mm_realloc(void *ptr, size_t size) {
+    void *ptr2 = mm_malloc(size);
+    int _size = 0;
+    if(ptr != NULL)
     {
-        if(i==offset/BLK_ARY)
-            content[i].next = NULL;
-        else
-            content[i].next = &content[i+1];
+        _size = GET_SIZE(HDRP(ptr));
+        memcpy(ptr2, ptr, _size);
+        mm_free(ptr);
     }
-    for(i=0;p->bid[i]>0;i++);
-    for(; i <= offset; i++)
-    {
-        num = find_block();
-        mem[num] = mmap(0, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-        label_bitmap(num);
-        content[i/BLK_ARY].bid[i%BLK_ARY] = num+1;
-    }
-    /*for(;i<(offset/BLK_ARY+1)*BLK_ARY;i++)
-        content[i/BLK_ARY].bid[i%BLK_ARY] = -1;*/
-    return ptr;
+    set_allocated(ptr2, size);
+    return ptr2;
 }
 
-static struct filenode* root = NULL;
+static const size_t size = 4 * 1024 * 1024 * (size_t)1024;
+static void *mem[64 * 1024];
+
+static struct filenode *root = NULL;
 
 static struct filenode *get_filenode(const char *name)
 {
@@ -188,8 +141,8 @@ static void *oshfs_init(struct fuse_conn_info *conn)
     }
     for(int i = 0; i < blocknr; i++) {
         munmap(mem[i], blocksize);
-    }
-    */
+    }*/
+    mm_init();
     return NULL;
 }
 
@@ -239,15 +192,10 @@ static int oshfs_open(const char *path, struct fuse_file_info *fi)
 
 static int oshfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    int i;
     struct filenode *node = get_filenode(path);
     node->st->st_size = offset + size;
-    node->content = reallocate(node->content, offset + size);
-    //memcpy(node->content + offset, buf, size);
-    i = 0;
-    while(node->content->next != NULL)
-        for(;i<BLK_ARY;i++)
-            memcpy(mem[node->content->bid[i%BLK_ARY]-1], buf+i, size);
+    node->content = realloc(node->content, offset + size);
+    memcpy(node->content + offset, buf, size);
     return size;
 }
 
@@ -255,7 +203,7 @@ static int oshfs_truncate(const char *path, off_t size)
 {
     struct filenode *node = get_filenode(path);
     node->st->st_size = size;
-    node->content = reallocate(node->content, size);
+    node->content = realloc(node->content, size);
     return 0;
 }
 
@@ -282,9 +230,10 @@ static int oshfs_unlink(const char *path)
     }
     else
         root = node->next;
-    allo_free(node->st);
-    allo_free(node->content);
-    allo_free(node);
+    free(node->st);
+    free(node->content);
+    free(node);
+    return 0;
     return 0;
 }
 
